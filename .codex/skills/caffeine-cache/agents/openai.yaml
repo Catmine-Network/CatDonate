@@ -1,0 +1,4 @@
+interface:
+  display_name: "Caffeine Cache"
+  short_description: "Use CatEngine and Caffeine for cache, cooldowns, and TTL state."
+  default_prompt: "Use this skill when adding or reviewing CatEngine/Caffeine cache, cooldown, rate limit, or temporary player state logic."

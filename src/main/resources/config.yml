@@ -1,0 +1,64 @@
+# Thông tin kết nối Card2K. Không chia sẻ partner-key cho bất kỳ ai.
+card2k:
+  partner-id: ""
+  partner-key: ""
+  # true: https://sandbox.card2k.com/chargingws/v2
+  # false: https://card2k.com/chargingws/v2
+  sandbox: true
+  connect-timeout-seconds: 10
+  request-timeout-seconds: 20
+
+# Danh sách mệnh giá được phép theo từng loại thẻ.
+# Xóa một mệnh giá để tắt lựa chọn đó.
+cardlist:
+  viettel: [10000, 20000, 30000, 50000, 100000, 200000, 300000, 500000, 1000000]
+  vinaphone: [10000, 20000, 30000, 50000, 100000, 200000, 300000, 500000]
+  mobifone: [10000, 20000, 30000, 50000, 100000, 200000, 300000, 500000]
+  garena: [20000, 50000, 100000, 200000, 500000]
+
+# Lệnh được chạy đúng một lần bằng console khi thẻ thành công.
+# %player% là tên người nạp; %reward% là base-amount sau khi nhân reward-multiplier.
+rewards:
+  "10000":
+    base-amount: 10
+    commands: ["points give %player% %reward%"]
+  "20000":
+    base-amount: 20
+    commands: ["points give %player% %reward%"]
+  "30000":
+    base-amount: 30
+    commands: ["points give %player% %reward%"]
+  "50000":
+    base-amount: 50
+    commands: ["points give %player% %reward%"]
+  "100000":
+    base-amount: 100
+    commands: ["points give %player% %reward%"]
+  "200000":
+    base-amount: 200
+    commands: ["points give %player% %reward%"]
+  "300000":
+    base-amount: 300
+    commands: ["points give %player% %reward%"]
+  "500000":
+    base-amount: 500
+    commands: ["points give %player% %reward%"]
+  "1000000":
+    base-amount: 1000
+    commands: ["points give %player% %reward%"]
+
+# Hệ số nhân số lượng thưởng. Ví dụ base-amount 10 và hệ số 1.2 sẽ trao 12 points.
+# Mỗi command vẫn chỉ chạy đúng một lần. Bắt buộc từ 1 trở lên.
+reward-multiplier: 1.0
+
+polling:
+  # Thời gian giữa hai lần kiểm tra Card2K.
+  interval-seconds: 30
+  # Sau số lần này giao dịch chuyển sang chờ quản trị viên xử lý.
+  max-attempts: 30
+  # Dữ liệu thẻ mã hóa của giao dịch hết lượt kiểm tra được giữ tối đa 7 ngày.
+  secret-retention-days: 7
+
+limits:
+  submit-cooldown-seconds: 5
+  max-pending-per-player: 3

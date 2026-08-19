@@ -1,0 +1,4 @@
+interface:
+  display_name: "Plugin Sounds"
+  short_description: "Work with configurable plugin sound feedback safely."
+  default_prompt: "Use this skill when adding, changing, or reviewing configurable sound feedback in a CatEngine-adopting Minecraft plugin."

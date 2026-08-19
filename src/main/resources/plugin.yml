@@ -1,0 +1,30 @@
+name: CatDonate
+description: Plugin nạp thẻ cho thị trường Việt Nam
+version: '${version}'
+
+main: net.catmine.studio.catDonate.CatDonate
+api-version: '26.1.2'
+folia-supported: true
+load: POSTWORLD
+
+authors: [ Catmine Studio ]
+website: studio.catmine.net
+
+libraries:
+  - org.jetbrains.kotlin:kotlin-stdlib-jdk8:$kotlinVersion
+  - org.jetbrains.kotlin:kotlin-reflect:$kotlinVersion
+  - org.xerial:sqlite-jdbc:$sqliteVersion
+
+permissions:
+  catdonate.use:
+    description: Cho phép người chơi gửi thẻ nạp.
+    default: true
+  catdonate.status:
+    description: Cho phép người chơi xem trạng thái giao dịch của mình.
+    default: true
+  catdonate.admin.reload:
+    description: Cho phép tải lại cấu hình CatDonate.
+    default: op
+  catdonate.admin.review:
+    description: Cho phép xem và xử lý thủ công giao dịch.
+    default: op

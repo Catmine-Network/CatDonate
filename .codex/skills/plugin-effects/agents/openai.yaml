@@ -1,0 +1,4 @@
+interface:
+  display_name: "Plugin Effects"
+  short_description: "Work with configurable plugin particle effects safely."
+  default_prompt: "Use this skill when adding, changing, or reviewing configurable particle effects in a CatEngine-adopting Minecraft plugin."
