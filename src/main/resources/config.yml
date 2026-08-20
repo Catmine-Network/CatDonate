@@ -52,8 +52,10 @@ rewards:
 reward-multiplier: 1.0
 
 polling:
-  # Thời gian giữa hai lần kiểm tra Card2K.
-  interval-seconds: 30
+  # Lần kiểm tra lại đầu tiên sau khi thẻ đang chờ kết quả.
+  interval-seconds: 15
+  # Mỗi lần chưa có kết quả, thời gian chờ lần kế tiếp tăng thêm số giây này.
+  interval-increment-seconds: 5
   # Sau số lần này giao dịch chuyển sang chờ quản trị viên xử lý.
   max-attempts: 30
   # Dữ liệu thẻ mã hóa của giao dịch hết lượt kiểm tra được giữ tối đa 7 ngày.

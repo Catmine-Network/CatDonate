@@ -64,6 +64,30 @@ class TransactionRepositoryTest {
     }
 
     @Test
+    fun `recent successful transactions excludes failures and orders by completion time`() {
+        val now = Instant.parse("2026-08-20T00:00:00Z")
+        val submission = CardSubmission(UUID.randomUUID(), "DemonDucky", Telco.VIETTEL, 10_000, "SERIAL11", "CODE011")
+        create("history-success-old", submission, "history-fp-1", now)
+        repository.markTerminal(
+            "history-success-old", TransactionStatus.SUCCESS, 10_000, null, null, null, "SUCCESS",
+            null, null, RewardState.NONE, null, now.plusSeconds(10),
+        )
+        create("history-failed", submission.copy(code = "CODE012"), "history-fp-2", now)
+        repository.markTerminal(
+            "history-failed", TransactionStatus.FAILED, null, null, null, "Thẻ lỗi", "FAILED",
+            null, null, RewardState.NONE, null, now.plusSeconds(20),
+        )
+        create("history-success-new", submission.copy(code = "CODE013"), "history-fp-3", now)
+        repository.markTerminal(
+            "history-success-new", TransactionStatus.SUCCESS, 20_000, null, null, null, "SUCCESS",
+            null, null, RewardState.NONE, null, now.plusSeconds(30),
+        )
+
+        assertEquals(listOf("history-success-new", "history-success-old"), repository.recentSuccessful(10).map { it.requestId })
+        assertEquals(listOf("history-success-new"), repository.recentSuccessful(1).map { it.requestId })
+    }
+
+    @Test
     fun `recovers interrupted reward and purges expired review secrets`() {
         val now = Instant.parse("2026-08-20T00:00:00Z")
         val submission = CardSubmission(UUID.randomUUID(), "DemonDucky", Telco.GARENA, 20_000, "SERIAL02", "CODE002")
@@ -74,7 +98,10 @@ class TransactionRepositoryTest {
         )
         repository.beginReward("20001", false, null, now)
         assertEquals(1, repository.recoverInterruptedRewards(now.plusSeconds(1)))
-        assertEquals(RewardState.NEEDS_REVIEW, repository.find("20001")!!.rewardState)
+        val recovered = repository.find("20001")!!
+        assertEquals(RewardState.NEEDS_REVIEW, recovered.rewardState)
+        assertEquals("REWARD_FAILED", recovered.notificationKey)
+        assertEquals(listOf("20001"), repository.undelivered(submission.playerId).map { it.requestId })
 
         create("20002", submission.copy(code = "CODE003"), "fp-3", now)
         repository.markTerminal(
@@ -97,7 +124,7 @@ class TransactionRepositoryTest {
         repository.markPending(
             "30001", 0, now.plusSeconds(60), null, null, "PROVIDER_PENDING", now, "PENDING",
         )
-        repository.markNotificationDelivered("30001")
+        repository.markNotificationDelivered("30001", "PENDING")
         assertTrue(repository.undelivered(submission.playerId).isEmpty())
 
         repository.markTerminal(
@@ -106,6 +133,42 @@ class TransactionRepositoryTest {
         )
 
         assertEquals(listOf("30001"), repository.undelivered(submission.playerId).map { it.requestId })
+    }
+
+    @Test
+    fun `stale pending acknowledgement cannot hide terminal notification`() {
+        val now = Instant.parse("2026-08-20T00:00:00Z")
+        val submission = CardSubmission(UUID.randomUUID(), "DemonDucky", Telco.VIETTEL, 10_000, "SERIAL04", "CODE004")
+        create("40001", submission, "fp-5", now)
+        repository.markPending("40001", 0, now.plusSeconds(60), null, null, "PROVIDER_PENDING", now, "PENDING")
+        repository.markTerminal(
+            "40001", TransactionStatus.FAILED, null, null, null, "Thẻ lỗi", "FAILED",
+            null, null, RewardState.NONE, null, now.plusSeconds(1),
+        )
+
+        repository.markNotificationDelivered("40001", "PENDING")
+
+        assertEquals(listOf("40001"), repository.undelivered(submission.playerId).map { it.requestId })
+    }
+
+    @Test
+    fun `claiming a full poll batch allows the next batch to progress`() {
+        val now = Instant.parse("2026-08-20T00:00:00Z")
+        repeat(51) { index ->
+            val submission = CardSubmission(
+                UUID.randomUUID(), "Player$index", Telco.VIETTEL, 10_000,
+                "SERIAL${index.toString().padStart(2, '0')}", "CODE${index.toString().padStart(3, '0')}",
+            )
+            create("500${index.toString().padStart(2, '0')}", submission, "batch-fp-$index", now)
+        }
+        val dueAt = now.plusSeconds(60)
+
+        val first = repository.claimDue(dueAt, dueAt.plusSeconds(25))
+        val second = repository.claimDue(dueAt, dueAt.plusSeconds(25))
+
+        assertEquals(50, first.size)
+        assertEquals(1, second.size)
+        assertTrue(first.none { it.requestId == second.single().requestId })
     }
 
     private fun create(requestId: String, submission: CardSubmission, fingerprint: String, now: Instant) =

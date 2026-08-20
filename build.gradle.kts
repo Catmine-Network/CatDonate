@@ -10,10 +10,12 @@ repositories {
     maven("https://repo.papermc.io/repository/maven-public/")
     maven("https://repo.panda-lang.org/releases")
     maven("https://repo.codemc.org/repository/maven-public/")
+    maven("https://repo.opencollab.dev/main/")
 }
 
 dependencies {
     compileOnly(libs.paper.api)
+    compileOnly(libs.floodgate.api)
     implementation(libs.catengine.common)
     implementation(libs.catengine.database) {
         exclude(group = "com.mysql", module = "mysql-connector-j")
@@ -44,6 +46,11 @@ tasks {
         .get()
         .asFile
         .absolutePath
+
+    jar {
+        // Keep the plain development JAR from overwriting the deployable shadow JAR.
+        archiveClassifier.set("dev")
+    }
 
     shadowJar {
         archiveClassifier.set("")
@@ -85,6 +92,10 @@ tasks {
 
     build {
         dependsOn(shadowJar, verifyPackagedSqlite)
+    }
+
+    assemble {
+        dependsOn(shadowJar)
     }
 
     test {

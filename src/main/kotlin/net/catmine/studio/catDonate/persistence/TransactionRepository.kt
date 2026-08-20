@@ -95,8 +95,20 @@ class TransactionRepository(private val dataSource: DataSource) {
         )
     }
 
-    fun due(now: Instant, limit: Int = 50): List<TransactionRecord> = dataSource.connection.use { connection ->
-        connection.prepareStatement(
+    fun recentSuccessful(limit: Int): List<TransactionRecord> {
+        require(limit in 1..50) { "Giới hạn lịch sử phải từ 1 đến 50" }
+        return dataSource.connection.use { connection ->
+            connection.prepareStatement(
+                "SELECT * FROM card_transactions WHERE status='SUCCESS' ORDER BY completed_at DESC LIMIT ?"
+            ).use { statement ->
+                statement.setInt(1, limit)
+                statement.executeQuery().use { rows -> buildList { while (rows.next()) add(rows.toRecord()) } }
+            }
+        }
+    }
+
+    fun claimDue(now: Instant, leaseUntil: Instant, limit: Int = 50): List<TransactionRecord> = transaction { connection ->
+        val records = connection.prepareStatement(
             """SELECT * FROM card_transactions
                WHERE status IN ('SUBMITTING','PENDING') AND next_poll_at IS NOT NULL AND next_poll_at<=?
                ORDER BY next_poll_at LIMIT ?"""
@@ -105,6 +117,20 @@ class TransactionRepository(private val dataSource: DataSource) {
             statement.setInt(2, limit)
             statement.executeQuery().use { rows -> buildList { while (rows.next()) add(rows.toRecord()) } }
         }
+        if (records.isNotEmpty()) {
+            connection.prepareStatement(
+                "UPDATE card_transactions SET next_poll_at=? WHERE request_id=? AND next_poll_at<=?"
+            ).use { statement ->
+                records.forEach { record ->
+                    statement.setLong(1, leaseUntil.toEpochMilli())
+                    statement.setString(2, record.requestId)
+                    statement.setLong(3, now.toEpochMilli())
+                    statement.addBatch()
+                }
+                statement.executeBatch()
+            }
+        }
+        records
     }
 
     fun countActive(): Int = dataSource.connection.use { connection ->
@@ -152,7 +178,7 @@ class TransactionRepository(private val dataSource: DataSource) {
         providerReceived: Long?,
         providerTransactionId: String?,
         error: String?,
-        notificationKey: String,
+        notificationKey: String?,
         rewardsJson: String?,
         rewardMultiplier: BigDecimal?,
         rewardState: RewardState,
@@ -203,15 +229,24 @@ class TransactionRepository(private val dataSource: DataSource) {
             current.copy(rewardState = RewardState.PROCESSING, rewardExecutedCount = 0, updatedAt = now)
         }
 
-    fun finishReward(requestId: String, success: Boolean, executed: Int, error: String?, now: Instant) =
+    fun finishReward(
+        requestId: String,
+        success: Boolean,
+        executed: Int,
+        error: String?,
+        successNotificationKey: String,
+        now: Instant,
+    ) =
         transaction { connection ->
             val record = find(connection, requestId) ?: return@transaction
             val state = if (success) RewardState.COMPLETED else RewardState.NEEDS_REVIEW
             connection.prepareStatement(
-                "UPDATE card_transactions SET reward_state=?, reward_executed_count=?, last_error=?, updated_at=? WHERE request_id=?"
+                """UPDATE card_transactions SET reward_state=?, reward_executed_count=?, last_error=?,
+                   notification_key=?, notification_delivered=0, updated_at=? WHERE request_id=?"""
             ).use {
                 it.setString(1, state.name); it.setInt(2, executed); it.setString(3, error)
-                it.setLong(4, now.toEpochMilli()); it.setString(5, requestId); it.executeUpdate()
+                it.setString(4, if (success) successNotificationKey else "REWARD_FAILED")
+                it.setLong(5, now.toEpochMilli()); it.setString(6, requestId); it.executeUpdate()
             }
             event(connection, requestId, if (success) "REWARD_COMPLETED" else "REWARD_FAILED", record.status, record.status, error, null, now)
         }
@@ -221,7 +256,8 @@ class TransactionRepository(private val dataSource: DataSource) {
             "SELECT request_id FROM card_transactions WHERE reward_state='PROCESSING'"
         ).use { statement -> statement.executeQuery().use { rows -> buildList { while (rows.next()) add(rows.getString(1)) } } }
         connection.prepareStatement(
-            "UPDATE card_transactions SET reward_state='NEEDS_REVIEW', last_error='Server dừng khi đang trao thưởng', updated_at=? WHERE reward_state='PROCESSING'"
+            """UPDATE card_transactions SET reward_state='NEEDS_REVIEW', last_error='Server dừng khi đang trao thưởng',
+               notification_key='REWARD_FAILED', notification_delivered=0, updated_at=? WHERE reward_state='PROCESSING'"""
         ).use { it.setLong(1, now.toEpochMilli()); it.executeUpdate() }
         ids.forEach { event(connection, it, "REWARD_RECOVERY_REVIEW", null, null, "Không tự động chạy lại để tránh thưởng trùng", null, now) }
         ids.size
@@ -231,16 +267,21 @@ class TransactionRepository(private val dataSource: DataSource) {
         val record = find(connection, requestId) ?: return@transaction false
         if (record.rewardState !in setOf(RewardState.PENDING, RewardState.NEEDS_REVIEW, RewardState.PROCESSING)) return@transaction false
         connection.prepareStatement(
-            "UPDATE card_transactions SET reward_state='COMPLETED', last_error=NULL, updated_at=? WHERE request_id=?"
+            """UPDATE card_transactions SET reward_state='COMPLETED', last_error=NULL,
+               notification_key='REWARD_CONFIRMED', notification_delivered=0, updated_at=? WHERE request_id=?"""
         ).use { it.setLong(1, now.toEpochMilli()); it.setString(2, requestId); it.executeUpdate() }
         event(connection, requestId, "ADMIN_CONFIRMED", record.status, record.status, "Đánh dấu hoàn thành, không chạy lệnh", actor, now)
         true
     }
 
-    fun markNotificationDelivered(requestId: String) {
+    fun markNotificationDelivered(requestId: String, notificationKey: String?) {
         dataSource.connection.use { connection -> connection.prepareStatement(
-            "UPDATE card_transactions SET notification_delivered=1 WHERE request_id=?"
-        ).use { it.setString(1, requestId); it.executeUpdate() } }
+            "UPDATE card_transactions SET notification_delivered=1 WHERE request_id=? AND notification_key=?"
+        ).use {
+            it.setString(1, requestId)
+            it.setString(2, notificationKey)
+            it.executeUpdate()
+        } }
     }
 
     fun undelivered(playerId: UUID): List<TransactionRecord> = dataSource.connection.use { connection ->

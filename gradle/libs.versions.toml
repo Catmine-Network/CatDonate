@@ -3,6 +3,7 @@ kotlin = "2.4.10"
 catengine = "1.0.0"
 gson = "2.13.2"
 sqlite = "3.51.3.0"
+floodgate = "2.2.5-SNAPSHOT"
 
 paper-api = "26.1.2.build.+"
 minecraft = "26.1.2"
@@ -16,6 +17,7 @@ catengine-common = { module = "net.catmine:catengine-common", version.ref = "cat
 catengine-database = { module = "net.catmine:catengine-database", version.ref = "catengine" }
 gson = { module = "com.google.code.gson:gson", version.ref = "gson" }
 sqlite-jdbc = { module = "org.xerial:sqlite-jdbc", version.ref = "sqlite" }
+floodgate-api = { module = "org.geysermc.floodgate:api", version.ref = "floodgate" }
 
 [plugins]
 shadow = { id = "com.gradleup.shadow", version.ref = "shadow" }

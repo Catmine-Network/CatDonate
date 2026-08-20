@@ -7,6 +7,7 @@ import net.catmine.studio.catDonate.model.AdminAction
 import net.catmine.studio.catDonate.model.CardSubmission
 import net.catmine.studio.catDonate.model.RewardState
 import net.catmine.studio.catDonate.model.SubmissionResult
+import net.catmine.studio.catDonate.model.Telco
 import net.catmine.studio.catDonate.model.TransactionRecord
 import net.catmine.studio.catDonate.model.TransactionStatus
 import net.catmine.studio.catDonate.persistence.CreateTransactionResult
@@ -43,6 +44,8 @@ class DefaultCardTopUpService(
     private val inFlight = ConcurrentHashMap.newKeySet<String>()
     private val requestIds = AtomicLong(clock.millis() * 1_000 + SecureRandom().nextInt(1_000))
 
+    override fun cardOptions(): Map<Telco, Set<Long>> = config.get().cardList
+
     override fun submit(submission: CardSubmission): CompletableFuture<SubmissionResult> {
         val snapshot = config.get()
         validate(submission, snapshot)?.let { return CompletableFuture.completedFuture(SubmissionResult.Invalid(it)) }
@@ -66,14 +69,29 @@ class DefaultCardTopUpService(
                 firstPollAt = clock.instant().plus(snapshot.pollInterval),
             )
             when (create) {
-                CreateTransactionResult.Created -> {
-                    sendProvider(requestId, submission, false, 0)
-                    SubmissionResult.Accepted(requestId, snapshot.pollInterval.seconds)
-                }
+                CreateTransactionResult.Created -> SubmissionResult.Accepted(
+                    requestId = requestId,
+                    nextCheckSeconds = snapshot.pollInterval.seconds,
+                )
                 is CreateTransactionResult.Duplicate -> SubmissionResult.Duplicate(create.requestId)
                 CreateTransactionResult.TooManyPending -> SubmissionResult.TooManyPending(snapshot.maxPendingPerPlayer)
             }
         }.exceptionally { SubmissionResult.Error(requestId) }
+    }
+
+    override fun startProcessing(requestId: String) {
+        scheduler.runAsync {
+            val record = repository.find(requestId) ?: return@runAsync
+            if (record.status.terminal) return@runAsync
+            val serial = runCatching { record.encryptedSerial?.let(secrets::decrypt) }.getOrNull()
+            val code = runCatching { record.encryptedCode?.let(secrets::decrypt) }.getOrNull()
+            if (serial == null || code == null) {
+                review(record, "Không thể giải mã dữ liệu thẻ", retainSecrets = false)
+                return@runAsync
+            }
+            val isCheck = record.status != TransactionStatus.SUBMITTING
+            sendProvider(record, serial, code, isCheck, if (isCheck) record.pollCount + 1 else record.pollCount)
+        }
     }
 
     override fun findStatus(playerId: UUID, requestId: String?): CompletableFuture<TransactionRecord?> =
@@ -82,10 +100,15 @@ class DefaultCardTopUpService(
     override fun findAdmin(requestId: String): CompletableFuture<TransactionRecord?> =
         scheduler.supplyAsync { repository.find(requestId) }
 
+    override fun recentSuccessfulTransactions(limit: Int): CompletableFuture<List<TransactionRecord>> =
+        scheduler.supplyAsync { repository.recentSuccessful(limit) }
+
     override fun adminAction(requestId: String, action: AdminAction, actor: String): CompletableFuture<Boolean> =
         scheduler.supplyAsync {
             when (action) {
-                AdminAction.CONFIRM -> repository.confirmReward(requestId, actor, clock.instant())
+                AdminAction.CONFIRM -> repository.confirmReward(requestId, actor, clock.instant()).also { confirmed ->
+                    if (confirmed) notifyLatest(requestId)
+                }
                 AdminAction.RETRY_REWARD -> {
                     val record = repository.beginReward(requestId, true, actor, clock.instant()) ?: return@supplyAsync false
                     executeReward(record)
@@ -119,27 +142,23 @@ class DefaultCardTopUpService(
     fun dispatchDue() {
         if (!polling.compareAndSet(false, true)) return
         try {
-            repository.purgeExpiredSecrets(clock.instant())
-            repository.due(clock.instant()).forEach { record ->
+            val snapshot = config.get()
+            val now = clock.instant()
+            repository.purgeExpiredSecrets(now)
+            val leaseUntil = now.plus(snapshot.provider.requestTimeout).plusSeconds(POLL_LEASE_GRACE_SECONDS)
+            repository.claimDue(now, leaseUntil).forEach { record ->
                 val serial = runCatching { record.encryptedSerial?.let(secrets::decrypt) }.getOrNull()
                 val code = runCatching { record.encryptedCode?.let(secrets::decrypt) }.getOrNull()
                 if (serial == null || code == null) {
                     review(record, "Không thể giải mã dữ liệu thẻ", retainSecrets = false)
                 } else {
-                    sendProvider(record, serial, code, true, record.pollCount + 1)
+                    val isCheck = record.status != TransactionStatus.SUBMITTING
+                    sendProvider(record, serial, code, isCheck, if (isCheck) record.pollCount + 1 else record.pollCount)
                 }
             }
         } finally {
             polling.set(false)
         }
-    }
-
-    private fun sendProvider(requestId: String, submission: CardSubmission, check: Boolean, pollCount: Int) {
-        sendProvider(
-            ProviderRequest(requestId, submission.telco, submission.amount, submission.serial, submission.code),
-            check,
-            pollCount,
-        )
     }
 
     private fun sendProvider(record: TransactionRecord, serial: String, code: String, check: Boolean, pollCount: Int) {
@@ -148,7 +167,13 @@ class DefaultCardTopUpService(
 
     private fun sendProvider(request: ProviderRequest, check: Boolean, pollCount: Int) {
         if (!inFlight.add(request.requestId)) return
-        val future = if (check) provider.get().check(request) else provider.get().submit(request)
+        val future = try {
+            if (check) provider.get().check(request) else provider.get().submit(request)
+        } catch (_: Throwable) {
+            inFlight.remove(request.requestId)
+            temporaryFailure(request.requestId, pollCount, "Lỗi tạm thời khi liên hệ Card2K")
+            return
+        }
         future.whenComplete { response, failure ->
             try {
                 if (failure != null) {
@@ -196,10 +221,10 @@ class DefaultCardTopUpService(
                         if (response.status == 4) "MAINTENANCE" else "PENDING"
                     } else null
                     repository.markPending(
-                        request.requestId, pollCount, now.plus(snapshot.pollInterval), response.transactionId,
+                        request.requestId, pollCount, now.plus(nextPollDelay(snapshot, pollCount)), response.transactionId,
                         if (response.status == 4) "Card2K đang bảo trì" else null,
                         if (response.status == 4) "PROVIDER_MAINTENANCE" else "PROVIDER_PENDING", now,
-                        initialNotification,
+                        if (initialNotification != null) "PENDING" else null,
                     )
                     if (initialNotification != null) notifyLatest(request.requestId)
                 }
@@ -212,17 +237,24 @@ class DefaultCardTopUpService(
         val snapshot = config.get()
         val commands = snapshot.rewards[rewardAmount]?.resolve(snapshot.rewardMultiplier).orEmpty()
         val state = if (commands.isEmpty()) RewardState.NONE else RewardState.PENDING
+        val successNotification = if (commands.isEmpty()) {
+            "SUCCESS_NO_REWARD"
+        } else if (wrongValue) {
+            "WRONG_VALUE"
+        } else {
+            "SUCCESS"
+        }
         val now = clock.instant()
         repository.markTerminal(
             requestId, TransactionStatus.SUCCESS, rewardAmount, response.receivedAmount, response.transactionId,
             if (wrongValue) "Thành công sai mệnh giá khai báo" else null,
-            if (commands.isEmpty()) "SUCCESS_NO_REWARD" else if (wrongValue) "WRONG_VALUE" else "SUCCESS",
+            if (state == RewardState.NONE) successNotification else null,
             RewardSnapshotCodec.encode(commands), snapshot.rewardMultiplier, state, null, now,
         )
-        val record = repository.find(requestId) ?: return
-        notifyLatest(requestId)
         if (state == RewardState.PENDING) {
             repository.beginReward(requestId, false, null, clock.instant())?.let(::executeReward)
+        } else {
+            notifyLatest(requestId)
         }
     }
 
@@ -246,7 +278,12 @@ class DefaultCardTopUpService(
             )
             notifyLatest(record.requestId)
         } else {
-            repository.markPending(requestId, pollCount, now.plus(snapshot.pollInterval), null, reason, "PROVIDER_RETRY", now)
+            val notification = if (pollCount == 0) "TIMEOUT" else null
+            repository.markPending(
+                requestId, pollCount, now.plus(nextPollDelay(snapshot, pollCount)), null, reason, "PROVIDER_RETRY", now,
+                if (notification != null) "PENDING" else null,
+            )
+            if (notification != null) notifyLatest(requestId)
         }
     }
 
@@ -262,12 +299,18 @@ class DefaultCardTopUpService(
 
     private fun executeReward(record: TransactionRecord) {
         val commands = record.rewardCommandsJson?.let(RewardSnapshotCodec::decode).orEmpty()
+        val successNotification = if (record.actualValue != null && record.actualValue != record.declaredAmount) {
+            "WRONG_VALUE"
+        } else {
+            "SUCCESS"
+        }
         rewardExecutor.execute(record, commands).whenComplete { result, failure ->
             val outcome = result ?: RewardExecution(false, 0, "Lỗi reward executor")
             repository.finishReward(
                 record.requestId, failure == null && outcome.success, outcome.executed,
-                if (failure == null) outcome.error else "Lỗi reward executor", clock.instant(),
+                if (failure == null) outcome.error else "Lỗi reward executor", successNotification, clock.instant(),
             )
+            notifyLatest(record.requestId)
         }
     }
 
@@ -285,7 +328,11 @@ class DefaultCardTopUpService(
         maxOf(previous + 1, clock.millis() * 1_000 + SecureRandom().nextInt(1_000))
     }.toString()
 
+    private fun nextPollDelay(config: DonateConfig, completedPolls: Int): java.time.Duration =
+        config.pollInterval.plus(config.pollIntervalIncrement.multipliedBy(completedPolls.toLong()))
+
     companion object {
         private val CARD_DATA = Regex("^[A-Za-z0-9]{6,32}$")
+        private const val POLL_LEASE_GRACE_SECONDS = 5L
     }
 }

@@ -6,6 +6,7 @@ main: net.catmine.studio.catDonate.CatDonate
 api-version: '26.1.2'
 folia-supported: true
 load: POSTWORLD
+softdepend: [ floodgate ]
 
 authors: [ Catmine Studio ]
 website: studio.catmine.net

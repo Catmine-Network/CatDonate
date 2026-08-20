@@ -13,8 +13,11 @@ import net.catmine.studio.catDonate.message.DonateMessage
 import net.catmine.studio.catDonate.message.DonateMessenger
 import net.catmine.studio.catDonate.model.AdminAction
 import net.catmine.studio.catDonate.service.CardTopUpService
+import net.kyori.adventure.text.Component
 import org.bukkit.command.CommandSender
 import org.bukkit.entity.Player
+import java.time.ZoneId
+import java.time.format.DateTimeFormatter
 
 @Command(name = "catdonate")
 class AdminCommand(
@@ -51,6 +54,31 @@ class AdminCommand(
         } }
     }
 
+    @Execute(name = "lichsu")
+    @Permission("catdonate.admin.review")
+    fun history(@Context sender: CommandSender) {
+        service.recentSuccessfulTransactions(HISTORY_LIMIT).whenComplete { records, failure -> reply(sender) {
+            if (failure != null) {
+                messenger.send(sender, DonateMessage.STATUS_LOAD_FAILED)
+            } else if (records.isEmpty()) {
+                messenger.send(sender, DonateMessage.ADMIN_HISTORY_EMPTY)
+            } else {
+                var message = messenger.component(DonateMessage.PREFIX)
+                    .append(messenger.component(DonateMessage.ADMIN_HISTORY_HEADER, mapOf("count" to records.size.toString())))
+                records.forEachIndexed { index, record ->
+                    message = message.append(Component.newline()).append(messenger.component(DonateMessage.ADMIN_HISTORY_ENTRY, mapOf(
+                        "number" to (index + 1).toString(),
+                        "completed_at" to HISTORY_TIME_FORMAT.format(record.completedAt ?: record.updatedAt),
+                        "player" to record.playerName,
+                        "telco" to record.telco.displayName,
+                        "amount" to formatAmount(record.actualValue ?: record.declaredAmount),
+                    )))
+                }
+                sender.sendMessage(message)
+            }
+        } }
+    }
+
     @Execute(name = "xuly")
     @Permission("catdonate.admin.review")
     fun action(@Context sender: CommandSender, @Arg requestId: String, @Arg action: AdminAction) {
@@ -66,5 +94,19 @@ class AdminCommand(
 
     private fun reply(sender: CommandSender, action: () -> Unit) {
         if (sender is Player) scheduler.runFor(sender) { action() } else scheduler.runGlobal { action() }
+    }
+
+    private fun formatAmount(amount: Long): String = amount.toString()
+        .reversed()
+        .chunked(3)
+        .joinToString(".")
+        .reversed()
+        .plus("đ")
+
+    companion object {
+        private const val HISTORY_LIMIT = 10
+        private val HISTORY_TIME_FORMAT: DateTimeFormatter = DateTimeFormatter
+            .ofPattern("dd/MM/yyyy HH:mm:ss")
+            .withZone(ZoneId.systemDefault())
     }
 }

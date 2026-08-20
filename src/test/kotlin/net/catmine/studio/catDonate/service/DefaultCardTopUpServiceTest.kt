@@ -48,6 +48,7 @@ class DefaultCardTopUpServiceTest {
     private lateinit var notifier: FakeNotifier
     private lateinit var service: DefaultCardTopUpService
     private val now = Instant.parse("2026-08-20T00:00:00Z")
+    private lateinit var clock: MutableClock
 
     @BeforeEach
     fun setup() {
@@ -60,10 +61,11 @@ class DefaultCardTopUpServiceTest {
         provider = FakeProvider()
         rewards = FakeRewards()
         notifier = FakeNotifier()
+        clock = MutableClock(now)
         service = DefaultCardTopUpService(
             config(), repository,
             CardSecrets.forTesting(ByteArray(32) { it.toByte() }, ByteArray(32) { (it + 1).toByte() }),
-            DirectScheduler(), rewards, notifier, Clock.fixed(now, ZoneOffset.UTC),
+            DirectScheduler(), rewards, notifier, clock,
         ) { provider }
     }
 
@@ -78,7 +80,7 @@ class DefaultCardTopUpServiceTest {
         val result = submit(10_000)
         assertInstanceOf(SubmissionResult.Accepted::class.java, result)
         result as SubmissionResult.Accepted
-        assertEquals(60, result.nextCheckSeconds)
+        assertEquals(15, result.nextCheckSeconds)
         val requestId = result.requestId
         val record = repository.find(requestId)!!
 
@@ -116,6 +118,8 @@ class DefaultCardTopUpServiceTest {
         assertEquals(RewardState.NEEDS_REVIEW, record.rewardState)
         assertEquals(1, rewards.calls)
         assertEquals("command failed", record.lastError)
+        assertEquals("REWARD_FAILED", record.notificationKey)
+        assertEquals(1, notifier.records.size)
     }
 
     @Test
@@ -145,9 +149,60 @@ class DefaultCardTopUpServiceTest {
         assertEquals(result.requestId, notifier.records.single().requestId)
     }
 
+    @Test
+    fun `success is not reported until reward execution completes`() {
+        provider.next = ProviderResponse(null, 1, 10_000, 10_000, null, "tx-reward", null)
+        val pendingReward = CompletableFuture<RewardExecution>()
+        rewards.future = pendingReward
+
+        val result = submit(10_000) as SubmissionResult.Accepted
+
+        val processing = repository.find(result.requestId)!!
+        assertEquals(RewardState.PROCESSING, processing.rewardState)
+        assertNull(processing.notificationKey)
+        assertEquals(0, notifier.records.size)
+
+        pendingReward.complete(RewardExecution(true, 1, null))
+
+        assertEquals(RewardState.COMPLETED, repository.find(result.requestId)!!.rewardState)
+        assertEquals("SUCCESS", notifier.records.single().notificationKey)
+    }
+
+    @Test
+    fun `initial provider failure reports retry timing`() {
+        provider.failure = RuntimeException("offline")
+
+        val result = submit(10_000) as SubmissionResult.Accepted
+        val record = repository.find(result.requestId)!!
+
+        assertEquals(TransactionStatus.PENDING, record.status)
+        assertEquals("PENDING", record.notificationKey)
+        assertEquals(now.plusSeconds(15), record.nextPollAt)
+        assertEquals("PENDING", notifier.records.single().notificationKey)
+    }
+
+    @Test
+    fun `pending checks wait 15 seconds then add 5 seconds per unsuccessful check`() {
+        provider.next = ProviderResponse(null, 99, 10_000, null, null, "tx-pending", "pending")
+
+        val result = submit(10_000) as SubmissionResult.Accepted
+        assertEquals(now.plusSeconds(15), repository.find(result.requestId)!!.nextPollAt)
+
+        clock.current = now.plusSeconds(15)
+        service.dispatchDue()
+
+        val afterFirstCheck = repository.find(result.requestId)!!
+        assertEquals(1, afterFirstCheck.pollCount)
+        assertEquals(now.plusSeconds(35), afterFirstCheck.nextPollAt)
+    }
+
     private fun submit(amount: Long): SubmissionResult {
         provider.requestIdFromRequest = true
-        return service.submit(CardSubmission(UUID.randomUUID(), "DemonDucky", Telco.VIETTEL, amount, "SERIAL01", "CODE001")).join()
+        val result = service.submit(
+            CardSubmission(UUID.randomUUID(), "DemonDucky", Telco.VIETTEL, amount, "SERIAL01", "CODE001")
+        ).join()
+        if (result is SubmissionResult.Accepted) service.startProcessing(result.requestId)
+        return result
     }
 
     private fun config() = DonateConfig(
@@ -155,33 +210,49 @@ class DefaultCardTopUpServiceTest {
         cardList = Telco.entries.associateWith { setOf(10_000L, 50_000L) },
         rewards = mapOf(10_000L to RewardDefinition(BigDecimal.TEN, listOf("points give %player% %reward%"))),
         rewardMultiplier = BigDecimal("1.2"),
-        pollInterval = Duration.ofSeconds(60), maxPollAttempts = 30, secretRetention = Duration.ofDays(7),
+        pollInterval = Duration.ofSeconds(15), pollIntervalIncrement = Duration.ofSeconds(5),
+        maxPollAttempts = 30, secretRetention = Duration.ofDays(7),
         submitCooldown = Duration.ofSeconds(5), maxPendingPerPlayer = 3,
     )
 
     private class FakeProvider : CardProviderClient {
         lateinit var next: ProviderResponse
+        var failure: Throwable? = null
         var requestIdFromRequest = true
         override fun submit(request: ProviderRequest) = completed(request)
         override fun check(request: ProviderRequest) = completed(request)
-        private fun completed(request: ProviderRequest): CompletableFuture<ProviderResponse> =
-            CompletableFuture.completedFuture(if (requestIdFromRequest && next.requestId == null) next.copy(requestId = request.requestId) else next)
+        private fun completed(request: ProviderRequest): CompletableFuture<ProviderResponse> {
+            failure?.let { throwable ->
+                return CompletableFuture<ProviderResponse>().also { it.completeExceptionally(throwable) }
+            }
+            return CompletableFuture.completedFuture(
+                if (requestIdFromRequest && next.requestId == null) next.copy(requestId = request.requestId) else next
+            )
+        }
     }
 
     private class FakeRewards : RewardExecutor {
         var result = RewardExecution(true, 1, null)
         var calls = 0
         var lastCommands = emptyList<String>()
+        var future: CompletableFuture<RewardExecution>? = null
         override fun execute(record: TransactionRecord, commands: List<String>): CompletableFuture<RewardExecution> {
             calls++
             lastCommands = commands
-            return CompletableFuture.completedFuture(result)
+            return future ?: CompletableFuture.completedFuture(result)
         }
     }
 
     private class FakeNotifier : OutcomeNotifier {
         val records = mutableListOf<TransactionRecord>()
         override fun notify(record: TransactionRecord) { records += record }
+    }
+
+    private class MutableClock(initial: Instant) : Clock() {
+        @Volatile var current: Instant = initial
+        override fun getZone(): ZoneOffset = ZoneOffset.UTC
+        override fun withZone(zone: java.time.ZoneId): Clock = this
+        override fun instant(): Instant = current
     }
 }
 

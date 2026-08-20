@@ -4,18 +4,17 @@ import java.time.Instant
 import java.math.BigDecimal
 import java.util.UUID
 
-enum class Telco(val apiName: String, vararg val aliases: String) {
-    VIETTEL("VIETTEL", "viettel"),
-    VINAPHONE("VINAPHONE", "vina", "vinaphone"),
-    MOBIFONE("MOBIFONE", "mobi", "mobifone"),
-    GARENA("GARENA", "garena");
+enum class Telco(val apiName: String, val displayName: String, vararg val aliases: String) {
+    VIETTEL("VIETTEL", "Viettel", "viettel"),
+    VINAPHONE("VINAPHONE", "Vinaphone", "vina", "vinaphone"),
+    MOBIFONE("MOBIFONE", "Mobifone", "mobi", "mobifone"),
+    GARENA("GARENA", "Garena", "garena");
 
     companion object {
         fun parse(value: String): Telco? = entries.firstOrNull { telco ->
             telco.aliases.any { it.equals(value, ignoreCase = true) }
         }
 
-        val suggestions: List<String> = listOf("viettel", "vinaphone", "mobifone", "garena")
     }
 }
 
@@ -41,7 +40,10 @@ data class CardSubmission(
 )
 
 sealed interface SubmissionResult {
-    data class Accepted(val requestId: String, val nextCheckSeconds: Long) : SubmissionResult
+    data class Accepted(
+        val requestId: String,
+        val nextCheckSeconds: Long,
+    ) : SubmissionResult
     data class Duplicate(val requestId: String?) : SubmissionResult
     data class Cooldown(val remainingSeconds: Long) : SubmissionResult
     data class TooManyPending(val limit: Int) : SubmissionResult

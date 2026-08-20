@@ -9,7 +9,6 @@ import net.catmine.engine.scheduler.CatScheduler
 import net.catmine.engine.scheduler.FoliaCatScheduler
 import net.catmine.studio.catDonate.command.AdminActionArgument
 import net.catmine.studio.catDonate.command.AdminCommand
-import net.catmine.studio.catDonate.command.TelcoArgument
 import net.catmine.studio.catDonate.command.TopUpCommand
 import net.catmine.studio.catDonate.config.DonateConfig
 import net.catmine.studio.catDonate.listener.PlayerNotificationListener
@@ -17,11 +16,14 @@ import net.catmine.studio.catDonate.message.BukkitOutcomeNotifier
 import net.catmine.studio.catDonate.message.DonateMessage
 import net.catmine.studio.catDonate.message.DonateMessenger
 import net.catmine.studio.catDonate.model.AdminAction
-import net.catmine.studio.catDonate.model.Telco
 import net.catmine.studio.catDonate.persistence.DonateDatabase
 import net.catmine.studio.catDonate.security.CardSecrets
 import net.catmine.studio.catDonate.service.BukkitRewardExecutor
 import net.catmine.studio.catDonate.service.DefaultCardTopUpService
+import net.catmine.studio.catDonate.ui.FloodgateUiFactory
+import net.catmine.studio.catDonate.ui.JavaTopUpDialog
+import net.catmine.studio.catDonate.ui.TopUpSubmissionController
+import net.catmine.studio.catDonate.ui.TopUpUiRouter
 import org.bukkit.command.CommandSender
 import org.bukkit.plugin.java.JavaPlugin
 import java.time.Instant
@@ -58,14 +60,21 @@ class CatDonate : JavaPlugin() {
                 BukkitRewardExecutor(this, scheduler),
                 notifier,
             )
+            val submissions = TopUpSubmissionController(service, messenger, scheduler)
+            val javaUi = JavaTopUpDialog(service, messenger, submissions)
+            val bedrockUi = if (server.pluginManager.isPluginEnabled("floodgate")) {
+                runCatching { FloodgateUiFactory.create(service, messenger, submissions, scheduler) }
+                    .onFailure { logger.warning("Không thể khởi tạo Floodgate form: ${it.message}") }
+                    .getOrNull()
+            } else null
+            val topUpUi = TopUpUiRouter(javaUi, bedrockUi)
 
             server.pluginManager.registerEvents(PlayerNotificationListener(notifier), this)
             liteCommands = LiteBukkitFactory.builder("catdonate", this)
                 .extension(FoliaExtension(this))
-                .argument(Telco::class.java, TelcoArgument())
                 .argument(AdminAction::class.java, AdminActionArgument())
                 .commands(
-                    TopUpCommand(service, messenger, scheduler),
+                    TopUpCommand(topUpUi, service, messenger, scheduler),
                     AdminCommand(this, service, messenger, scheduler),
                 )
                 .build()

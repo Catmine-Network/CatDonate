@@ -12,6 +12,8 @@ import java.util.zip.ZipFile;
 
 public final class PackagedSqliteSmoke {
     private static final String SQLITE_CLASS = "org/sqlite/JDBC.class";
+    private static final String RELOCATED_FOLIA_SCHEDULER =
+        "net/catmine/studio/catdonate/libs/catengine/scheduler/FoliaCatScheduler.class";
     private PackagedSqliteSmoke() {
     }
 
@@ -27,6 +29,9 @@ public final class PackagedSqliteSmoke {
         try (ZipFile jar = new ZipFile(artifact.toFile())) {
             if (jar.getEntry(SQLITE_CLASS) != null) {
                 throw new IllegalStateException("sqlite-jdbc must not be bundled in the fat JAR");
+            }
+            if (jar.getEntry(RELOCATED_FOLIA_SCHEDULER) == null) {
+                throw new IllegalStateException("CatEngine FoliaCatScheduler is missing from the fat JAR");
             }
             ZipEntry pluginYaml = jar.getEntry("plugin.yml");
             if (pluginYaml == null) {

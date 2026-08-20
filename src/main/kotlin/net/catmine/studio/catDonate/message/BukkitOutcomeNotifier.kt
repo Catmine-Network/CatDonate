@@ -5,6 +5,8 @@ import net.catmine.studio.catDonate.model.TransactionRecord
 import net.catmine.studio.catDonate.persistence.TransactionRepository
 import net.catmine.studio.catDonate.service.OutcomeNotifier
 import org.bukkit.Bukkit
+import java.time.Duration
+import java.time.Instant
 
 class BukkitOutcomeNotifier(
     private val scheduler: CatScheduler,
@@ -16,7 +18,7 @@ class BukkitOutcomeNotifier(
             val player = Bukkit.getPlayer(record.playerId) ?: return@runGlobal
             scheduler.runFor(player) {
                 send(player, record)
-                scheduler.runAsync { repository.markNotificationDelivered(record.requestId) }
+                scheduler.runAsync { repository.markNotificationDelivered(record.requestId, record.notificationKey) }
             }
         }
     }
@@ -27,7 +29,9 @@ class BukkitOutcomeNotifier(
                 val player = Bukkit.getPlayer(playerId) ?: return@runGlobal
                 scheduler.runFor(player) {
                     records.forEach { send(player, it) }
-                    scheduler.runAsync { records.forEach { repository.markNotificationDelivered(it.requestId) } }
+                    scheduler.runAsync {
+                        records.forEach { repository.markNotificationDelivered(it.requestId, it.notificationKey) }
+                    }
                 }
             }
         }
@@ -36,9 +40,18 @@ class BukkitOutcomeNotifier(
     private fun send(player: org.bukkit.entity.Player, record: TransactionRecord) {
         val key = runCatching { DonateMessage.valueOf(record.notificationKey ?: "") }.getOrElse { DonateMessage.NEEDS_REVIEW }
         messenger.send(player, key, mapOf(
-            "request_id" to record.requestId,
-            "amount" to (record.actualValue ?: record.declaredAmount).toString(),
+            "amount" to formatAmount(record.actualValue ?: record.declaredAmount),
             "reason" to (record.lastError ?: "Không rõ nguyên nhân"),
+            "seconds" to record.nextPollAt?.let {
+                Duration.between(Instant.now(), it).seconds.coerceAtLeast(1).toString()
+            }.orEmpty(),
         ))
     }
+
+    private fun formatAmount(amount: Long): String = amount.toString()
+        .reversed()
+        .chunked(3)
+        .joinToString(".")
+        .reversed()
+        .plus("đ")
 }
