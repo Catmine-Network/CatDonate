@@ -36,6 +36,7 @@ enum class DonateMessage(
     USAGE_ADMIN("usage-admin", "<yellow>Dùng: /catdonate [reload|xem|lichsu|xuly] ..."),
     INVALID_AMOUNT("invalid-amount", "<red>Mệnh giá {amount} không được bật cho {telco}."),
     INVALID_CARD_DATA("invalid-card-data", "<red>Serial và mã thẻ không hợp lệ."),
+    TOP_UP_BLOCKED("top-up-blocked", "<red>Bạn đã nhập thẻ sai quá nhiều lần. Vui lòng thử lại sau {hours} giờ {minutes} phút."),
     NOT_CONFIGURED("not-configured", "<red>Dịch vụ nạp thẻ hiện chưa sẵn sàng."),
     COOLDOWN("cooldown", "<yellow>Vui lòng chờ {seconds} giây."),
     TOO_MANY_PENDING("too-many-pending", "<red>Bạn đang có tối đa {limit} giao dịch chờ."),

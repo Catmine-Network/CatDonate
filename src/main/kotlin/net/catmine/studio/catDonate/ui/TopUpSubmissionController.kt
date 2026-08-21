@@ -54,6 +54,17 @@ class TopUpSubmissionController(
                 DonateMessage.COOLDOWN,
                 mapOf("seconds" to result.remainingSeconds.toString()),
             )
+            is SubmissionResult.Blocked -> {
+                val totalMinutes = (result.remainingSeconds + 59) / 60
+                messenger.send(
+                    player,
+                    DonateMessage.TOP_UP_BLOCKED,
+                    mapOf(
+                        "hours" to (totalMinutes / 60).toString(),
+                        "minutes" to (totalMinutes % 60).toString(),
+                    ),
+                )
+            }
             is SubmissionResult.TooManyPending -> messenger.send(
                 player,
                 DonateMessage.TOO_MANY_PENDING,

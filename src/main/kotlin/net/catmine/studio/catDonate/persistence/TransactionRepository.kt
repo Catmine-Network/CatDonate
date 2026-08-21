@@ -17,8 +17,14 @@ import javax.sql.DataSource
 sealed interface CreateTransactionResult {
     data object Created : CreateTransactionResult
     data class Duplicate(val requestId: String?) : CreateTransactionResult
+    data class Blocked(val until: Instant) : CreateTransactionResult
     data object TooManyPending : CreateTransactionResult
 }
+
+data class CardFailureState(
+    val consecutiveFailures: Int,
+    val blockedUntil: Instant?,
+)
 
 class TransactionRepository(private val dataSource: DataSource) {
     fun create(
@@ -32,6 +38,9 @@ class TransactionRepository(private val dataSource: DataSource) {
         now: Instant,
         firstPollAt: Instant,
     ): CreateTransactionResult = transaction { connection ->
+        blockedUntil(connection, submission.playerId, now)?.let { until ->
+            return@transaction CreateTransactionResult.Blocked(until)
+        }
         val pending = connection.prepareStatement(
             "SELECT COUNT(*) FROM card_transactions WHERE player_uuid=? AND status IN ('SUBMITTING','PENDING')"
         ).use { statement ->
@@ -72,6 +81,56 @@ class TransactionRepository(private val dataSource: DataSource) {
                 statement.executeQuery().use { if (it.next()) it.getString(1) else null }
             }
             CreateTransactionResult.Duplicate(duplicateId)
+        }
+    }
+
+    fun recordFailedCard(
+        playerId: UUID,
+        failureLimit: Int,
+        blockDuration: java.time.Duration,
+        now: Instant,
+    ): CardFailureState = transaction { connection ->
+        require(failureLimit >= 1) { "failureLimit phải từ 1 trở lên" }
+        val current = connection.prepareStatement(
+            "SELECT consecutive_failed_cards, blocked_until FROM player_top_up_security WHERE player_uuid=?"
+        ).use { statement ->
+            statement.setString(1, playerId.toString())
+            statement.executeQuery().use { rows ->
+                if (rows.next()) CardFailureState(
+                    rows.getInt("consecutive_failed_cards"),
+                    rows.nullableInstant("blocked_until"),
+                ) else null
+            }
+        }
+        if (current?.blockedUntil?.isAfter(now) == true) return@transaction current
+
+        val failures = (if (current?.blockedUntil != null) 0 else current?.consecutiveFailures ?: 0) + 1
+        val blockedUntil = if (failures >= failureLimit) now.plus(blockDuration) else null
+        connection.prepareStatement(
+            """INSERT INTO player_top_up_security(player_uuid, consecutive_failed_cards, blocked_until, updated_at)
+               VALUES (?, ?, ?, ?)
+               ON CONFLICT(player_uuid) DO UPDATE SET consecutive_failed_cards=excluded.consecutive_failed_cards,
+                   blocked_until=excluded.blocked_until, updated_at=excluded.updated_at"""
+        ).use { statement ->
+            statement.setString(1, playerId.toString())
+            statement.setInt(2, failures)
+            statement.setNullableLong(3, blockedUntil?.toEpochMilli())
+            statement.setLong(4, now.toEpochMilli())
+            statement.executeUpdate()
+        }
+        CardFailureState(failures, blockedUntil)
+    }
+
+    fun resetFailedCards(playerId: UUID, now: Instant) {
+        dataSource.connection.use { connection ->
+            connection.prepareStatement(
+                """UPDATE player_top_up_security SET consecutive_failed_cards=0, blocked_until=NULL, updated_at=?
+                   WHERE player_uuid=?"""
+            ).use { statement ->
+                statement.setLong(1, now.toEpochMilli())
+                statement.setString(2, playerId.toString())
+                statement.executeUpdate()
+            }
         }
     }
 
@@ -339,6 +398,17 @@ class TransactionRepository(private val dataSource: DataSource) {
         "SELECT status FROM card_transactions WHERE request_id=?"
     ).use { it.setString(1, requestId); it.executeQuery().use { rows -> if (rows.next()) TransactionStatus.valueOf(rows.getString(1)) else null } }
 
+    private fun blockedUntil(connection: Connection, playerId: UUID, now: Instant): Instant? {
+        val until = connection.prepareStatement(
+            "SELECT blocked_until FROM player_top_up_security WHERE player_uuid=?"
+        ).use { statement ->
+            statement.setString(1, playerId.toString())
+            statement.executeQuery().use { rows -> if (rows.next()) rows.nullableInstant("blocked_until") else null }
+        }
+        if (until == null || !until.isAfter(now)) return null
+        return until
+    }
+
     private fun findSecret(connection: Connection, requestId: String, column: String): String? = connection.prepareStatement(
         "SELECT $column FROM card_transactions WHERE request_id=?"
     ).use { it.setString(1, requestId); it.executeQuery().use { rows -> if (rows.next()) rows.getString(1) else null } }
@@ -371,6 +441,7 @@ private fun java.sql.PreparedStatement.setNullableLong(index: Int, value: Long?)
 private fun java.sql.PreparedStatement.setNullableDecimal(index: Int, value: BigDecimal?) = if (value == null) setNull(index, java.sql.Types.NUMERIC) else setString(index, value.toPlainString())
 private fun ResultSet.nullableLong(column: String): Long? = getLong(column).let { if (wasNull()) null else it }
 private fun ResultSet.nullableDecimal(column: String): BigDecimal? = getString(column)?.toBigDecimalOrNull()
+private fun ResultSet.nullableInstant(column: String): Instant? = nullableLong(column)?.let(Instant::ofEpochMilli)
 private fun ResultSet.toRecord(): TransactionRecord = TransactionRecord(
     requestId = getString("request_id"), playerId = UUID.fromString(getString("player_uuid")), playerName = getString("player_name"),
     telco = Telco.valueOf(getString("telco")), declaredAmount = getLong("declared_amount"), actualValue = nullableLong("actual_value"),

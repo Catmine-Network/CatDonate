@@ -8,7 +8,9 @@ enum class Telco(val apiName: String, val displayName: String, vararg val aliase
     VIETTEL("VIETTEL", "Viettel", "viettel"),
     VINAPHONE("VINAPHONE", "Vinaphone", "vina", "vinaphone"),
     MOBIFONE("MOBIFONE", "Mobifone", "mobi", "mobifone"),
-    GARENA("GARENA", "Garena", "garena");
+    GARENA("GARENA", "Garena", "garena"),
+    ZING("ZING", "Zing", "zing"),
+    VCOIN("VCOIN", "Vcoin", "vcoin", "v-coin");
 
     companion object {
         fun parse(value: String): Telco? = entries.firstOrNull { telco ->
@@ -46,6 +48,7 @@ sealed interface SubmissionResult {
     ) : SubmissionResult
     data class Duplicate(val requestId: String?) : SubmissionResult
     data class Cooldown(val remainingSeconds: Long) : SubmissionResult
+    data class Blocked(val remainingSeconds: Long) : SubmissionResult
     data class TooManyPending(val limit: Int) : SubmissionResult
     data object NotConfigured : SubmissionResult
     data class Invalid(val reason: String) : SubmissionResult

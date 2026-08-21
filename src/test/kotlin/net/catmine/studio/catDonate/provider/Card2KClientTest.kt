@@ -69,6 +69,12 @@ class Card2KClientTest {
         assertTrue(commands.all { it["sign"] == Card2KClient.signature("key", "CODE001", "SERIAL01") })
     }
 
+    @Test
+    fun `provider protocol names support ZING and VCOIN`() {
+        assertEquals("ZING", Telco.ZING.apiName)
+        assertEquals("VCOIN", Telco.VCOIN.apiName)
+    }
+
     private fun decodeForm(raw: String): Map<String, String> = raw.split('&').associate { pair ->
         val (key, value) = pair.split('=', limit = 2)
         URLDecoder.decode(key, StandardCharsets.UTF_8) to URLDecoder.decode(value, StandardCharsets.UTF_8)

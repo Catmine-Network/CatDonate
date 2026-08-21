@@ -1,5 +1,6 @@
 package net.catmine.studio.catDonate.config
 
+import net.catmine.studio.catDonate.model.Telco
 import org.bukkit.configuration.file.YamlConfiguration
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertThrows
@@ -45,6 +46,21 @@ class DonateConfigTest {
 
         assertEquals(Duration.ofSeconds(15), config.pollInterval)
         assertEquals(Duration.ofSeconds(5), config.pollIntervalIncrement)
+    }
+
+    @Test
+    fun `ZING and VCOIN card lists are loaded`() {
+        val config = load(
+            """
+            cardlist:
+              zing: [10000, 1000000]
+              vcoin: [20000, 500000]
+            reward-multiplier: 1
+            """.trimIndent(),
+        )
+
+        assertEquals(setOf(10_000L, 1_000_000L), config.cardList.getValue(Telco.ZING))
+        assertEquals(setOf(20_000L, 500_000L), config.cardList.getValue(Telco.VCOIN))
     }
 
     private fun load(raw: String): DonateConfig = DonateConfig.load(YamlConfiguration().apply { loadFromString(raw) })

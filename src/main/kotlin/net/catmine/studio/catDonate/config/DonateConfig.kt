@@ -34,6 +34,8 @@ data class DonateConfig(
     val secretRetention: Duration,
     val submitCooldown: Duration,
     val maxPendingPerPlayer: Int,
+    val failedCardAttemptsBeforeBlock: Int,
+    val failedCardBlockDuration: Duration,
 ) {
     companion object {
         fun load(config: FileConfiguration): DonateConfig {
@@ -97,6 +99,8 @@ data class DonateConfig(
                 secretRetention = Duration.ofDays(positive("polling.secret-retention-days", 7).toLong()),
                 submitCooldown = Duration.ofSeconds(positive("limits.submit-cooldown-seconds", 5).toLong()),
                 maxPendingPerPlayer = positive("limits.max-pending-per-player", 3),
+                failedCardAttemptsBeforeBlock = positive("limits.failed-card-attempts-before-block", 5),
+                failedCardBlockDuration = Duration.ofHours(positive("limits.failed-card-block-hours", 24).toLong()),
             )
         }
     }

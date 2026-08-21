@@ -1,5 +1,6 @@
 package net.catmine.studio.catDonate.service
 
+import com.github.benmanes.caffeine.cache.Caffeine
 import net.catmine.engine.cache.CooldownService
 import net.catmine.engine.scheduler.CatScheduler
 import net.catmine.studio.catDonate.config.DonateConfig
@@ -19,6 +20,7 @@ import net.catmine.studio.catDonate.provider.ProviderResponse
 import net.catmine.studio.catDonate.security.CardSecrets
 import java.security.SecureRandom
 import java.time.Clock
+import java.time.Duration
 import java.time.Instant
 import java.util.UUID
 import java.util.concurrent.CompletableFuture
@@ -40,6 +42,10 @@ class DefaultCardTopUpService(
     private val config = AtomicReference(initialConfig)
     private val provider = AtomicReference(providerFactory(initialConfig))
     @Volatile private var cooldowns = CooldownService<UUID>(initialConfig.submitCooldown)
+    private val topUpBlocks = Caffeine.newBuilder()
+        .expireAfterWrite(initialConfig.failedCardBlockDuration)
+        .maximumSize(MAX_CACHED_TOP_UP_BLOCKS)
+        .build<UUID, Instant>()
     private val polling = AtomicBoolean(false)
     private val inFlight = ConcurrentHashMap.newKeySet<String>()
     private val requestIds = AtomicLong(clock.millis() * 1_000 + SecureRandom().nextInt(1_000))
@@ -50,6 +56,9 @@ class DefaultCardTopUpService(
         val snapshot = config.get()
         validate(submission, snapshot)?.let { return CompletableFuture.completedFuture(SubmissionResult.Invalid(it)) }
         if (!snapshot.provider.configured) return CompletableFuture.completedFuture(SubmissionResult.NotConfigured)
+        cachedBlock(submission.playerId)?.let { until ->
+            return CompletableFuture.completedFuture(SubmissionResult.Blocked(remainingSeconds(until)))
+        }
         val gate = cooldowns.tryUse(submission.playerId)
         if (!gate.allowed) return CompletableFuture.completedFuture(
             SubmissionResult.Cooldown(gate.remaining.seconds.coerceAtLeast(1))
@@ -74,6 +83,10 @@ class DefaultCardTopUpService(
                     nextCheckSeconds = snapshot.pollInterval.seconds,
                 )
                 is CreateTransactionResult.Duplicate -> SubmissionResult.Duplicate(create.requestId)
+                is CreateTransactionResult.Blocked -> {
+                    topUpBlocks.put(submission.playerId, create.until)
+                    SubmissionResult.Blocked(remainingSeconds(create.until))
+                }
                 CreateTransactionResult.TooManyPending -> SubmissionResult.TooManyPending(snapshot.maxPendingPerPlayer)
             }
         }.exceptionally { SubmissionResult.Error(requestId) }
@@ -136,6 +149,7 @@ class DefaultCardTopUpService(
         }
         cooldowns.clearAll()
         cooldowns = CooldownService(config.submitCooldown)
+        topUpBlocks.invalidateAll()
         true
     }
 
@@ -251,6 +265,10 @@ class DefaultCardTopUpService(
             if (state == RewardState.NONE) successNotification else null,
             RewardSnapshotCodec.encode(commands), snapshot.rewardMultiplier, state, null, now,
         )
+        repository.find(requestId)?.playerId?.let { playerId ->
+            repository.resetFailedCards(playerId, now)
+            topUpBlocks.invalidate(playerId)
+        }
         if (state == RewardState.PENDING) {
             repository.beginReward(requestId, false, null, clock.instant())?.let(::executeReward)
         } else {
@@ -260,10 +278,17 @@ class DefaultCardTopUpService(
 
     private fun terminalFailure(requestId: String, response: ProviderResponse, reason: String, notification: String) {
         val now = clock.instant()
+        val record = repository.find(requestId) ?: return
         repository.markTerminal(
             requestId, TransactionStatus.FAILED, null, response.receivedAmount, response.transactionId,
             reason.take(500), notification, null, null, RewardState.NONE, null, now,
         )
+        repository.recordFailedCard(
+            record.playerId,
+            config.get().failedCardAttemptsBeforeBlock,
+            config.get().failedCardBlockDuration,
+            now,
+        ).blockedUntil?.let { until -> topUpBlocks.put(record.playerId, until) }
         notifyLatest(requestId)
     }
 
@@ -331,8 +356,19 @@ class DefaultCardTopUpService(
     private fun nextPollDelay(config: DonateConfig, completedPolls: Int): java.time.Duration =
         config.pollInterval.plus(config.pollIntervalIncrement.multipliedBy(completedPolls.toLong()))
 
+    private fun cachedBlock(playerId: UUID): Instant? {
+        val until = topUpBlocks.getIfPresent(playerId) ?: return null
+        if (until.isAfter(clock.instant())) return until
+        topUpBlocks.invalidate(playerId)
+        return null
+    }
+
+    private fun remainingSeconds(until: Instant): Long =
+        Duration.between(clock.instant(), until).seconds.coerceAtLeast(1)
+
     companion object {
         private val CARD_DATA = Regex("^[A-Za-z0-9]{6,32}$")
         private const val POLL_LEASE_GRACE_SECONDS = 5L
+        private const val MAX_CACHED_TOP_UP_BLOCKS = 10_000L
     }
 }

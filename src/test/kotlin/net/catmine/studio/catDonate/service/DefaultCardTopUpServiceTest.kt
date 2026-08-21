@@ -196,6 +196,54 @@ class DefaultCardTopUpServiceTest {
         assertEquals(now.plusSeconds(35), afterFirstCheck.nextPollAt)
     }
 
+    @Test
+    fun `five consecutive rejected cards block top ups for 24 hours including after restart`() {
+        service.reload(config().copy(submitCooldown = Duration.ofMillis(1))).join()
+        val playerId = UUID.randomUUID()
+        provider.next = ProviderResponse(null, 3, 10_000, null, null, null, "rejected")
+
+        repeat(5) { index ->
+            val result = submitFor(playerId, index)
+            assertInstanceOf(SubmissionResult.Accepted::class.java, result)
+            if (index < 4) clock.current = clock.current.plusSeconds(6)
+        }
+
+        val cachedBlock = service.submit(cardSubmission(playerId, 9)).join()
+        assertInstanceOf(SubmissionResult.Blocked::class.java, cachedBlock)
+        assertEquals(86_400, (cachedBlock as SubmissionResult.Blocked).remainingSeconds)
+
+        val restarted = DefaultCardTopUpService(
+            config(), repository,
+            CardSecrets.forTesting(ByteArray(32) { it.toByte() }, ByteArray(32) { (it + 1).toByte() }),
+            DirectScheduler(), rewards, notifier, clock,
+        ) { provider }
+        val persistedBlock = restarted.submit(cardSubmission(playerId, 10)).join()
+        assertInstanceOf(SubmissionResult.Blocked::class.java, persistedBlock)
+        assertEquals(86_400, (persistedBlock as SubmissionResult.Blocked).remainingSeconds)
+    }
+
+    @Test
+    fun `successful card resets consecutive rejected card count`() {
+        service.reload(config().copy(submitCooldown = Duration.ofMillis(1))).join()
+        val playerId = UUID.randomUUID()
+        provider.next = ProviderResponse(null, 3, 10_000, null, null, null, "rejected")
+
+        repeat(4) { index ->
+            assertInstanceOf(SubmissionResult.Accepted::class.java, submitFor(playerId, index))
+            clock.current = clock.current.plusSeconds(6)
+        }
+        provider.next = ProviderResponse(null, 1, 10_000, 10_000, null, null, "ok")
+        assertInstanceOf(SubmissionResult.Accepted::class.java, submitFor(playerId, 4))
+        clock.current = clock.current.plusSeconds(6)
+
+        provider.next = ProviderResponse(null, 3, 10_000, null, null, null, "rejected")
+        repeat(4) { index ->
+            assertInstanceOf(SubmissionResult.Accepted::class.java, submitFor(playerId, index + 5))
+            clock.current = clock.current.plusSeconds(6)
+        }
+        assertInstanceOf(SubmissionResult.Accepted::class.java, service.submit(cardSubmission(playerId, 9)).join())
+    }
+
     private fun submit(amount: Long): SubmissionResult {
         provider.requestIdFromRequest = true
         val result = service.submit(
@@ -205,6 +253,19 @@ class DefaultCardTopUpServiceTest {
         return result
     }
 
+    private fun submitFor(playerId: UUID, index: Int): SubmissionResult {
+        Thread.sleep(6)
+        provider.requestIdFromRequest = true
+        val result = service.submit(cardSubmission(playerId, index)).join()
+        if (result is SubmissionResult.Accepted) service.startProcessing(result.requestId)
+        return result
+    }
+
+    private fun cardSubmission(playerId: UUID, index: Int) = CardSubmission(
+        playerId, "DemonDucky", Telco.VIETTEL, 10_000,
+        "SERIAL0$index", "CODE00$index",
+    )
+
     private fun config() = DonateConfig(
         provider = ProviderSettings("partner", "key", true, Duration.ofSeconds(1), Duration.ofSeconds(1)),
         cardList = Telco.entries.associateWith { setOf(10_000L, 50_000L) },
@@ -213,6 +274,7 @@ class DefaultCardTopUpServiceTest {
         pollInterval = Duration.ofSeconds(15), pollIntervalIncrement = Duration.ofSeconds(5),
         maxPollAttempts = 30, secretRetention = Duration.ofDays(7),
         submitCooldown = Duration.ofSeconds(5), maxPendingPerPlayer = 3,
+        failedCardAttemptsBeforeBlock = 5, failedCardBlockDuration = Duration.ofHours(24),
     )
 
     private class FakeProvider : CardProviderClient {

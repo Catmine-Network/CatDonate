@@ -37,6 +37,8 @@ class CardSecretsTest {
         assertEquals(Telco.VINAPHONE, Telco.parse("vina"))
         assertEquals(Telco.MOBIFONE, Telco.parse("mobi"))
         assertEquals(Telco.GARENA, Telco.parse("GARENA"))
+        assertEquals(Telco.ZING, Telco.parse("zing"))
+        assertEquals(Telco.VCOIN, Telco.parse("v-coin"))
         assertNull(Telco.parse("unknown"))
     }
 }

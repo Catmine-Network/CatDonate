@@ -24,6 +24,7 @@ invalid-form-selection: "<red>Lựa chọn nhà mạng hoặc mệnh giá không
 usage-admin: "<yellow>Dùng: /catdonate [reload|xem|lichsu|xuly] ..."
 invalid-amount: "<red>Mệnh giá {amount} không được bật cho {telco}."
 invalid-card-data: "<red>Serial và mã thẻ chỉ gồm chữ/số, dài từ 6 đến 32 ký tự."
+top-up-blocked: "<red>Bạn đã nhập thẻ sai quá nhiều lần. Vui lòng thử lại sau {hours} giờ {minutes} phút."
 not-configured: "<red>Dịch vụ nạp thẻ hiện chưa sẵn sàng. Hãy liên hệ quản trị viên."
 cooldown: "<yellow>Vui lòng chờ {seconds} giây trước khi gửi thẻ tiếp theo."
 too-many-pending: "<red>Bạn đang có tối đa {limit} giao dịch chờ xử lý."

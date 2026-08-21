@@ -4,7 +4,7 @@ card2k:
   partner-key: ""
   # true: https://sandbox.card2k.com/chargingws/v2
   # false: https://card2k.com/chargingws/v2
-  sandbox: true
+  sandbox: false
   connect-timeout-seconds: 10
   request-timeout-seconds: 20
 
@@ -15,6 +15,8 @@ cardlist:
   vinaphone: [10000, 20000, 30000, 50000, 100000, 200000, 300000, 500000]
   mobifone: [10000, 20000, 30000, 50000, 100000, 200000, 300000, 500000]
   garena: [20000, 50000, 100000, 200000, 500000]
+  zing: [10000, 20000, 50000, 100000, 200000, 500000, 1000000]
+  vcoin: [10000, 20000, 50000, 100000, 200000, 500000, 1000000]
 
 # Lệnh được chạy đúng một lần bằng console khi thẻ thành công.
 # %player% là tên người nạp; %reward% là base-amount sau khi nhân reward-multiplier.
@@ -64,3 +66,7 @@ polling:
 limits:
   submit-cooldown-seconds: 5
   max-pending-per-player: 3
+  # Khóa nạp thẻ sau số lần thẻ bị provider xác nhận là không hợp lệ liên tiếp.
+  failed-card-attempts-before-block: 5
+  # Thời gian khóa tính năng nạp thẻ cho mỗi người chơi.
+  failed-card-block-hours: 24
