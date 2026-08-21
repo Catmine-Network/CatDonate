@@ -4,4 +4,6 @@
 
 ## Support duy nhất provider Card2k
 
-## Plugin sử dụng Dialog API (1.21.6) và có Bedrock Form thông qua Floodgate
+## Plugin sử dụng Dialog API (1.21.6+) và có Bedrock Form thông qua Floodgate
+
+## Support thẻ Viettel, Vina, Mobi, Zing, Garena, Vcoin
