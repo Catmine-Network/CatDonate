@@ -45,21 +45,30 @@ class TopUpCommand(
         } }
     }
 
-    private fun TransactionRecord.statusPlaceholders(): Map<String, String> = mapOf(
-        "status" to messenger.plain(status.messageKey()),
-        "next_check" to nextPollAt?.let {
+    private fun TransactionRecord.statusPlaceholders(): Map<String, String> {
+        val detail = if (status in setOf(TransactionStatus.FAILED, TransactionStatus.SUBMISSION_FAILED)) {
+            lastError?.let { messenger.plain(DonateMessage.STATUS_DETAIL, mapOf("reason" to it)) }.orEmpty()
+        } else {
+            ""
+        }
+        val nextCheck = nextPollAt?.let {
             messenger.plain(
                 DonateMessage.STATUS_NEXT_CHECK,
                 mapOf("seconds" to Duration.between(Instant.now(), it).seconds.coerceAtLeast(1).toString()),
             )
-        }.orEmpty(),
-    )
+        }.orEmpty()
+        return mapOf(
+            "status" to messenger.plain(status.messageKey()),
+            "next_check" to (nextCheck + detail),
+        )
+    }
 
     private fun TransactionStatus.messageKey(): DonateMessage = when (this) {
         TransactionStatus.SUBMITTING -> DonateMessage.STATUS_SUBMITTING
         TransactionStatus.PENDING -> DonateMessage.STATUS_PENDING
         TransactionStatus.SUCCESS -> DonateMessage.STATUS_SUCCESS
         TransactionStatus.FAILED -> DonateMessage.STATUS_FAILED
+        TransactionStatus.SUBMISSION_FAILED -> DonateMessage.STATUS_SUBMISSION_FAILED
         TransactionStatus.NEEDS_REVIEW -> DonateMessage.STATUS_NEEDS_REVIEW
         TransactionStatus.POLL_EXHAUSTED -> DonateMessage.STATUS_POLL_EXHAUSTED
         TransactionStatus.REVIEW_EXPIRED -> DonateMessage.STATUS_REVIEW_EXPIRED

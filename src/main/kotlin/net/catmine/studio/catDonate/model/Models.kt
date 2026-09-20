@@ -25,6 +25,7 @@ enum class TransactionStatus(val terminal: Boolean) {
     PENDING(false),
     SUCCESS(true),
     FAILED(true),
+    SUBMISSION_FAILED(true),
     NEEDS_REVIEW(true),
     POLL_EXHAUSTED(true),
     REVIEW_EXPIRED(true)
@@ -47,6 +48,7 @@ sealed interface SubmissionResult {
         val nextCheckSeconds: Long,
     ) : SubmissionResult
     data class Duplicate(val requestId: String?) : SubmissionResult
+    data class PreviouslyRejected(val requestId: String, val reason: String?) : SubmissionResult
     data class Cooldown(val remainingSeconds: Long) : SubmissionResult
     data class Blocked(val remainingSeconds: Long) : SubmissionResult
     data class TooManyPending(val limit: Int) : SubmissionResult
@@ -93,6 +95,15 @@ data class TransactionEvent(
     val actor: String?,
     val createdAt: Instant,
 )
+
+data class PlayerTransactionHistory(
+    val playerId: UUID,
+    val playerName: String,
+    val transactions: List<TransactionRecord>,
+) {
+    val successfulTransactions: List<TransactionRecord> = transactions.filter { it.status == TransactionStatus.SUCCESS }
+    val totalTopUp: Long = successfulTransactions.sumOf { it.actualValue ?: it.declaredAmount }
+}
 
 enum class AdminAction(val wireName: String) {
     RECHECK("kiem-tra-lai"), RETRY_REWARD("thu-lai"), CONFIRM("xac-nhan");

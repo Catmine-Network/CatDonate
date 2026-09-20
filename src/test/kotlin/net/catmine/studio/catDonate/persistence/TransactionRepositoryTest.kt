@@ -88,6 +88,49 @@ class TransactionRepositoryTest {
     }
 
     @Test
+    fun `player history includes every status and totals successful actual values`() {
+        val now = Instant.parse("2026-08-20T00:00:00Z")
+        val playerId = UUID.randomUUID()
+        val submission = CardSubmission(playerId, "DemonDucky", Telco.VIETTEL, 10_000, "SERIAL21", "CODE021")
+        create("player-success", submission, "player-fp-1", now)
+        repository.markTerminal(
+            "player-success", TransactionStatus.SUCCESS, 20_000, null, null, null, "SUCCESS",
+            null, null, RewardState.NONE, null, now.plusSeconds(10),
+        )
+        create("player-failed", submission.copy(code = "CODE022"), "player-fp-2", now.plusSeconds(1))
+        repository.markTerminal(
+            "player-failed", TransactionStatus.FAILED, null, null, null, "Thẻ đã sử dụng", "FAILED",
+            null, null, RewardState.NONE, null, now.plusSeconds(20),
+        )
+
+        val byName = repository.playerHistory("demonducky")!!
+        assertEquals(playerId, byName.playerId)
+        assertEquals(listOf("player-failed", "player-success"), byName.transactions.map { it.requestId })
+        assertEquals(1, byName.successfulTransactions.size)
+        assertEquals(20_000, byName.totalTopUp)
+        assertEquals(byName, repository.playerHistory(playerId.toString()))
+        assertNull(repository.playerHistory("UnknownPlayer"))
+    }
+
+    @Test
+    fun `duplicate result retains the existing terminal status and reason`() {
+        val now = Instant.parse("2026-08-20T00:00:00Z")
+        val submission = CardSubmission(UUID.randomUUID(), "DemonDucky", Telco.VIETTEL, 10_000, "SERIAL31", "CODE031")
+        create("rejected-card", submission, "rejected-fingerprint", now)
+        repository.markTerminal(
+            "rejected-card", TransactionStatus.FAILED, null, null, null, "Thẻ đã sử dụng", "FAILED",
+            null, null, RewardState.NONE, null, now.plusSeconds(1),
+        )
+
+        val duplicate = create("rejected-card-retry", submission, "rejected-fingerprint", now.plusSeconds(2))
+
+        assertEquals(
+            CreateTransactionResult.Duplicate("rejected-card", TransactionStatus.FAILED, "Thẻ đã sử dụng"),
+            duplicate,
+        )
+    }
+
+    @Test
     fun `recovers interrupted reward and purges expired review secrets`() {
         val now = Instant.parse("2026-08-20T00:00:00Z")
         val submission = CardSubmission(UUID.randomUUID(), "DemonDucky", Telco.GARENA, 20_000, "SERIAL02", "CODE002")

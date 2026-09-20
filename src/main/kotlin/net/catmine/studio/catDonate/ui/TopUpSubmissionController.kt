@@ -49,6 +49,13 @@ class TopUpSubmissionController(
             is SubmissionResult.Duplicate -> {
                 messenger.send(player, DonateMessage.DUPLICATE_CARD)
             }
+            is SubmissionResult.PreviouslyRejected -> {
+                messenger.send(
+                    player,
+                    DonateMessage.PREVIOUSLY_REJECTED_CARD,
+                    mapOf("reason" to (result.reason ?: "Thẻ lỗi")),
+                )
+            }
             is SubmissionResult.Cooldown -> messenger.send(
                 player,
                 DonateMessage.COOLDOWN,

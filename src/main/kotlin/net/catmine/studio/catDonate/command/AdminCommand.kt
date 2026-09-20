@@ -79,6 +79,40 @@ class AdminCommand(
         } }
     }
 
+    @Execute(name = "lichsu")
+    @Permission("catdonate.admin.review")
+    fun playerHistory(@Context sender: CommandSender, @Arg player: String) {
+        service.playerHistory(player).whenComplete { history, failure -> reply(sender) {
+            when {
+                failure != null -> messenger.send(sender, DonateMessage.STATUS_LOAD_FAILED)
+                history == null -> messenger.send(
+                    sender,
+                    DonateMessage.ADMIN_PLAYER_HISTORY_NOT_FOUND,
+                    mapOf("player" to player),
+                )
+                else -> {
+                    messenger.send(sender, DonateMessage.ADMIN_PLAYER_HISTORY_HEADER, mapOf(
+                        "player" to history.playerName,
+                        "player_id" to history.playerId.toString(),
+                        "total" to formatAmount(history.totalTopUp),
+                        "success_count" to history.successfulTransactions.size.toString(),
+                        "count" to history.transactions.size.toString(),
+                    ))
+                    history.transactions.forEachIndexed { index, record ->
+                        messenger.send(sender, DonateMessage.ADMIN_PLAYER_HISTORY_ENTRY, mapOf(
+                            "number" to (index + 1).toString(),
+                            "created_at" to HISTORY_TIME_FORMAT.format(record.createdAt),
+                            "request_id" to record.requestId,
+                            "telco" to record.telco.displayName,
+                            "amount" to formatAmount(record.actualValue ?: record.declaredAmount),
+                            "status" to record.status.name,
+                        ))
+                    }
+                }
+            }
+        } }
+    }
+
     @Execute(name = "xuly")
     @Permission("catdonate.admin.review")
     fun action(@Context sender: CommandSender, @Arg requestId: String, @Arg action: AdminAction) {

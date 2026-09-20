@@ -6,6 +6,7 @@ import net.catmine.engine.scheduler.CatScheduler
 import net.catmine.studio.catDonate.config.DonateConfig
 import net.catmine.studio.catDonate.model.AdminAction
 import net.catmine.studio.catDonate.model.CardSubmission
+import net.catmine.studio.catDonate.model.PlayerTransactionHistory
 import net.catmine.studio.catDonate.model.RewardState
 import net.catmine.studio.catDonate.model.SubmissionResult
 import net.catmine.studio.catDonate.model.Telco
@@ -82,7 +83,11 @@ class DefaultCardTopUpService(
                     requestId = requestId,
                     nextCheckSeconds = snapshot.pollInterval.seconds,
                 )
-                is CreateTransactionResult.Duplicate -> SubmissionResult.Duplicate(create.requestId)
+                is CreateTransactionResult.Duplicate -> if (create.status == TransactionStatus.FAILED && create.requestId != null) {
+                    SubmissionResult.PreviouslyRejected(create.requestId, create.reason)
+                } else {
+                    SubmissionResult.Duplicate(create.requestId)
+                }
                 is CreateTransactionResult.Blocked -> {
                     topUpBlocks.put(submission.playerId, create.until)
                     SubmissionResult.Blocked(remainingSeconds(create.until))
@@ -115,6 +120,9 @@ class DefaultCardTopUpService(
 
     override fun recentSuccessfulTransactions(limit: Int): CompletableFuture<List<TransactionRecord>> =
         scheduler.supplyAsync { repository.recentSuccessful(limit) }
+
+    override fun playerHistory(playerIdentifier: String): CompletableFuture<PlayerTransactionHistory?> =
+        scheduler.supplyAsync { repository.playerHistory(playerIdentifier.trim()) }
 
     override fun adminAction(requestId: String, action: AdminAction, actor: String): CompletableFuture<Boolean> =
         scheduler.supplyAsync {
@@ -204,6 +212,10 @@ class DefaultCardTopUpService(
     }
 
     private fun handleResponse(request: ProviderRequest, response: ProviderResponse, pollCount: Int) {
+        if (response.status == 100 && (response.requestId == null || response.requestId == request.requestId)) {
+            submissionFailure(request.requestId, response)
+            return
+        }
         if (response.requestId != request.requestId) {
             val record = repository.find(request.requestId) ?: return
             review(record, "Provider trả request_id không khớp", retainSecrets = true)
@@ -219,8 +231,7 @@ class DefaultCardTopUpService(
                     review(repository.find(request.requestId) ?: return, "Thiếu mệnh giá thực cho status 2", retainSecrets = true)
                 } else success(request.requestId, actual, response, true)
             }
-            3 -> terminalFailure(request.requestId, response, "Thẻ lỗi", "FAILED")
-            100 -> terminalFailure(request.requestId, response, response.message ?: "Provider từ chối request", "FAILED")
+            3 -> cardFailure(request.requestId, response)
             4, 99 -> {
                 if (pollCount >= snapshot.maxPollAttempts) {
                     val record = repository.find(request.requestId) ?: return
@@ -236,9 +247,9 @@ class DefaultCardTopUpService(
                     } else null
                     repository.markPending(
                         request.requestId, pollCount, now.plus(nextPollDelay(snapshot, pollCount)), response.transactionId,
-                        if (response.status == 4) "Card2K đang bảo trì" else null,
+                        if (response.status == 4) response.message ?: "Card2K đang bảo trì" else null,
                         if (response.status == 4) "PROVIDER_MAINTENANCE" else "PROVIDER_PENDING", now,
-                        if (initialNotification != null) "PENDING" else null,
+                        initialNotification,
                     )
                     if (initialNotification != null) notifyLatest(request.requestId)
                 }
@@ -276,12 +287,12 @@ class DefaultCardTopUpService(
         }
     }
 
-    private fun terminalFailure(requestId: String, response: ProviderResponse, reason: String, notification: String) {
+    private fun cardFailure(requestId: String, response: ProviderResponse) {
         val now = clock.instant()
         val record = repository.find(requestId) ?: return
         repository.markTerminal(
             requestId, TransactionStatus.FAILED, null, response.receivedAmount, response.transactionId,
-            reason.take(500), notification, null, null, RewardState.NONE, null, now,
+            (response.message ?: "Thẻ lỗi").take(500), "FAILED", null, null, RewardState.NONE, null, now,
         )
         repository.recordFailedCard(
             record.playerId,
@@ -289,6 +300,18 @@ class DefaultCardTopUpService(
             config.get().failedCardBlockDuration,
             now,
         ).blockedUntil?.let { until -> topUpBlocks.put(record.playerId, until) }
+        notifyLatest(requestId)
+    }
+
+    private fun submissionFailure(requestId: String, response: ProviderResponse) {
+        val now = clock.instant()
+        val snapshot = config.get()
+        repository.markTerminal(
+            requestId, TransactionStatus.SUBMISSION_FAILED, null, response.receivedAmount, response.transactionId,
+            (response.message ?: "Gửi thẻ thất bại").take(500), "SUBMISSION_FAILED",
+            null, null, RewardState.NONE, now.plus(snapshot.secretRetention), now,
+            releaseFingerprint = true,
+        )
         notifyLatest(requestId)
     }
 

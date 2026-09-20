@@ -1,6 +1,7 @@
 package net.catmine.studio.catDonate.persistence
 
 import net.catmine.studio.catDonate.model.CardSubmission
+import net.catmine.studio.catDonate.model.PlayerTransactionHistory
 import net.catmine.studio.catDonate.model.RewardState
 import net.catmine.studio.catDonate.model.Telco
 import net.catmine.studio.catDonate.model.TransactionEvent
@@ -16,7 +17,11 @@ import javax.sql.DataSource
 
 sealed interface CreateTransactionResult {
     data object Created : CreateTransactionResult
-    data class Duplicate(val requestId: String?) : CreateTransactionResult
+    data class Duplicate(
+        val requestId: String?,
+        val status: TransactionStatus?,
+        val reason: String?,
+    ) : CreateTransactionResult
     data class Blocked(val until: Instant) : CreateTransactionResult
     data object TooManyPending : CreateTransactionResult
 }
@@ -38,6 +43,9 @@ class TransactionRepository(private val dataSource: DataSource) {
         now: Instant,
         firstPollAt: Instant,
     ): CreateTransactionResult = transaction { connection ->
+        findByFingerprint(connection, fingerprint)?.let { existing ->
+            return@transaction existing.asDuplicate()
+        }
         blockedUntil(connection, submission.playerId, now)?.let { until ->
             return@transaction CreateTransactionResult.Blocked(until)
         }
@@ -74,13 +82,8 @@ class TransactionRepository(private val dataSource: DataSource) {
             CreateTransactionResult.Created
         } catch (exception: SQLException) {
             if (!exception.isConstraintViolation()) throw exception
-            val duplicateId = connection.prepareStatement(
-                "SELECT request_id FROM card_transactions WHERE fingerprint=?"
-            ).use { statement ->
-                statement.setString(1, fingerprint)
-                statement.executeQuery().use { if (it.next()) it.getString(1) else null }
-            }
-            CreateTransactionResult.Duplicate(duplicateId)
+            findByFingerprint(connection, fingerprint)?.asDuplicate()
+                ?: CreateTransactionResult.Duplicate(null, null, null)
         }
     }
 
@@ -166,6 +169,27 @@ class TransactionRepository(private val dataSource: DataSource) {
         }
     }
 
+    fun playerHistory(playerIdentifier: String): PlayerTransactionHistory? = dataSource.connection.use { connection ->
+        val playerId = playerIdentifier.toUuidOrNull() ?: connection.prepareStatement(
+            """SELECT player_uuid FROM card_transactions
+               WHERE player_name=? COLLATE NOCASE ORDER BY created_at DESC LIMIT 1"""
+        ).use { statement ->
+            statement.setString(1, playerIdentifier)
+            statement.executeQuery().use { rows ->
+                if (rows.next()) UUID.fromString(rows.getString("player_uuid")) else null
+            }
+        } ?: return@use null
+
+        val transactions = connection.prepareStatement(
+            "SELECT * FROM card_transactions WHERE player_uuid=? ORDER BY created_at DESC"
+        ).use { statement ->
+            statement.setString(1, playerId.toString())
+            statement.executeQuery().use { rows -> buildList { while (rows.next()) add(rows.toRecord()) } }
+        }
+        if (transactions.isEmpty()) return@use null
+        PlayerTransactionHistory(playerId, transactions.first().playerName, transactions)
+    }
+
     fun claimDue(now: Instant, leaseUntil: Instant, limit: Int = 50): List<TransactionRecord> = transaction { connection ->
         val records = connection.prepareStatement(
             """SELECT * FROM card_transactions
@@ -243,6 +267,7 @@ class TransactionRepository(private val dataSource: DataSource) {
         rewardState: RewardState,
         retainSecretsUntil: Instant?,
         now: Instant,
+        releaseFingerprint: Boolean = false,
     ) = transaction { connection ->
         require(newStatus.terminal)
         val old = status(connection, requestId) ?: return@transaction
@@ -251,7 +276,9 @@ class TransactionRepository(private val dataSource: DataSource) {
                provider_transaction_id=COALESCE(?, provider_transaction_id), last_error=?, notification_key=?,
                notification_delivered=0,
                reward_commands=?, reward_multiplier=?, reward_state=?, next_poll_at=NULL, completed_at=?, updated_at=?,
-               encrypted_code=?, encrypted_serial=?, sensitive_expires_at=? WHERE request_id=?"""
+               encrypted_code=?, encrypted_serial=?, sensitive_expires_at=?,
+               fingerprint=CASE WHEN ? THEN fingerprint || ':' || request_id ELSE fingerprint END
+               WHERE request_id=?"""
         ).use { statement ->
             statement.setString(1, newStatus.name)
             statement.setNullableLong(2, actualValue)
@@ -267,7 +294,8 @@ class TransactionRepository(private val dataSource: DataSource) {
             if (retainSecretsUntil == null) statement.setNull(12, java.sql.Types.VARCHAR) else statement.setString(12, findSecret(connection, requestId, "encrypted_code"))
             if (retainSecretsUntil == null) statement.setNull(13, java.sql.Types.VARCHAR) else statement.setString(13, findSecret(connection, requestId, "encrypted_serial"))
             statement.setNullableLong(14, retainSecretsUntil?.toEpochMilli())
-            statement.setString(15, requestId)
+            statement.setInt(15, if (releaseFingerprint) 1 else 0)
+            statement.setString(16, requestId)
             statement.executeUpdate()
         }
         event(connection, requestId, "TERMINAL", old, newStatus, error, null, now)
@@ -366,7 +394,14 @@ class TransactionRepository(private val dataSource: DataSource) {
                status=CASE WHEN status IN ('POLL_EXHAUSTED','NEEDS_REVIEW') THEN 'REVIEW_EXPIRED' ELSE status END, updated_at=?
                WHERE sensitive_expires_at IS NOT NULL AND sensitive_expires_at<=?"""
         ).use { it.setLong(1, now.toEpochMilli()); it.setLong(2, now.toEpochMilli()); it.executeUpdate() }
-        records.forEach { (id, old) -> event(connection, id, "SECRET_PURGED", old, TransactionStatus.REVIEW_EXPIRED, "Dữ liệu nhạy cảm đã hết hạn", null, now) }
+        records.forEach { (id, old) ->
+            val updated = if (old in setOf(TransactionStatus.POLL_EXHAUSTED, TransactionStatus.NEEDS_REVIEW)) {
+                TransactionStatus.REVIEW_EXPIRED
+            } else {
+                old
+            }
+            event(connection, id, "SECRET_PURGED", old, updated, "Dữ liệu nhạy cảm đã hết hạn", null, now)
+        }
         records.size
     }
 
@@ -393,6 +428,10 @@ class TransactionRepository(private val dataSource: DataSource) {
     private fun find(connection: Connection, requestId: String): TransactionRecord? = connection.prepareStatement(
         "SELECT * FROM card_transactions WHERE request_id=?"
     ).use { it.setString(1, requestId); it.executeQuery().use { rows -> if (rows.next()) rows.toRecord() else null } }
+
+    private fun findByFingerprint(connection: Connection, fingerprint: String): TransactionRecord? = connection.prepareStatement(
+        "SELECT * FROM card_transactions WHERE fingerprint=?"
+    ).use { it.setString(1, fingerprint); it.executeQuery().use { rows -> if (rows.next()) rows.toRecord() else null } }
 
     private fun status(connection: Connection, requestId: String): TransactionStatus? = connection.prepareStatement(
         "SELECT status FROM card_transactions WHERE request_id=?"
@@ -435,6 +474,9 @@ class TransactionRepository(private val dataSource: DataSource) {
         }
     }
 }
+
+private fun TransactionRecord.asDuplicate() = CreateTransactionResult.Duplicate(requestId, status, lastError)
+private fun String.toUuidOrNull(): UUID? = runCatching(UUID::fromString).getOrNull()
 
 private fun SQLException.isConstraintViolation(): Boolean = sqlState?.startsWith("23") == true || message?.contains("UNIQUE", true) == true
 private fun java.sql.PreparedStatement.setNullableLong(index: Int, value: Long?) = if (value == null) setNull(index, java.sql.Types.BIGINT) else setLong(index, value)

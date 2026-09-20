@@ -150,6 +150,19 @@ class DefaultCardTopUpServiceTest {
     }
 
     @Test
+    fun `initial maintenance response uses the maintenance notification`() {
+        provider.next = ProviderResponse(null, 4, 10_000, null, null, null, "Hệ thống bảo trì")
+
+        val result = submit(10_000) as SubmissionResult.Accepted
+        val record = repository.find(result.requestId)!!
+
+        assertEquals(TransactionStatus.PENDING, record.status)
+        assertEquals("MAINTENANCE", record.notificationKey)
+        assertEquals("Hệ thống bảo trì", record.lastError)
+        assertEquals("MAINTENANCE", notifier.records.single().notificationKey)
+    }
+
+    @Test
     fun `success is not reported until reward execution completes`() {
         provider.next = ProviderResponse(null, 1, 10_000, 10_000, null, "tx-reward", null)
         val pendingReward = CompletableFuture<RewardExecution>()
@@ -179,6 +192,51 @@ class DefaultCardTopUpServiceTest {
         assertEquals("PENDING", record.notificationKey)
         assertEquals(now.plusSeconds(15), record.nextPollAt)
         assertEquals("PENDING", notifier.records.single().notificationKey)
+    }
+
+    @Test
+    fun `provider rejected fingerprint is refused locally without a second api call`() {
+        service.reload(config().copy(submitCooldown = Duration.ofMillis(1))).join()
+        val playerId = UUID.randomUUID()
+        provider.next = ProviderResponse(null, 3, 10_000, null, null, null, "Thẻ đã sử dụng")
+
+        val first = submitFor(playerId, 0)
+        assertInstanceOf(SubmissionResult.Accepted::class.java, first)
+        assertEquals(TransactionStatus.FAILED, repository.find((first as SubmissionResult.Accepted).requestId)!!.status)
+        clock.current = clock.current.plusSeconds(6)
+
+        val retry = submitFor(playerId, 0)
+
+        assertInstanceOf(SubmissionResult.PreviouslyRejected::class.java, retry)
+        assertEquals("Thẻ đã sử dụng", (retry as SubmissionResult.PreviouslyRejected).reason)
+        assertEquals(1, provider.calls)
+    }
+
+    @Test
+    fun `status one hundred is terminal but releases the card for a new submission`() {
+        service.reload(config().copy(submitCooldown = Duration.ofMillis(1))).join()
+        val playerId = UUID.randomUUID()
+        provider.next = ProviderResponse(null, 100, null, null, null, null, "Sai chữ ký")
+        provider.requestIdFromRequest = false
+
+        val first = service.submit(cardSubmission(playerId, 0)).join() as SubmissionResult.Accepted
+        service.startProcessing(first.requestId)
+        val record = repository.find(first.requestId)!!
+
+        assertEquals(TransactionStatus.SUBMISSION_FAILED, record.status)
+        assertEquals(RewardState.NONE, record.rewardState)
+        assertEquals("SUBMISSION_FAILED", record.notificationKey)
+        assertEquals("Sai chữ ký", record.lastError)
+        kotlin.test.assertNotNull(record.encryptedCode)
+        kotlin.test.assertNotNull(record.sensitiveExpiresAt)
+
+        Thread.sleep(6)
+        clock.current = clock.current.plusSeconds(6)
+        val retry = service.submit(cardSubmission(playerId, 0)).join()
+
+        assertInstanceOf(SubmissionResult.Accepted::class.java, retry)
+        service.startProcessing((retry as SubmissionResult.Accepted).requestId)
+        assertEquals(2, provider.calls)
     }
 
     @Test
@@ -281,9 +339,11 @@ class DefaultCardTopUpServiceTest {
         lateinit var next: ProviderResponse
         var failure: Throwable? = null
         var requestIdFromRequest = true
+        var calls = 0
         override fun submit(request: ProviderRequest) = completed(request)
         override fun check(request: ProviderRequest) = completed(request)
         private fun completed(request: ProviderRequest): CompletableFuture<ProviderResponse> {
+            calls++
             failure?.let { throwable ->
                 return CompletableFuture<ProviderResponse>().also { it.completeExceptionally(throwable) }
             }

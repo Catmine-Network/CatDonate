@@ -38,6 +38,8 @@ class DonateMessageTest {
             DonateMessage.NOT_CONFIGURED,
             DonateMessage.DUPLICATE_CARD,
             DonateMessage.DUPLICATE_CARD_UNKNOWN,
+            DonateMessage.PREVIOUSLY_REJECTED_CARD,
+            DonateMessage.SUBMISSION_FAILED,
             DonateMessage.SUBMITTED,
             DonateMessage.SUBMITTED_WAIT,
             DonateMessage.PENDING,
